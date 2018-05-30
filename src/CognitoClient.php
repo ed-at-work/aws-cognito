@@ -4,6 +4,7 @@ namespace pmill\AwsCognito;
 use Aws\CognitoIdentityProvider\CognitoIdentityProviderClient;
 use Aws\CognitoIdentityProvider\Exception\CognitoIdentityProviderException;
 use Exception;
+use GuzzleHttp\Client;
 use Jose\Component\Core\AlgorithmManager;
 use Jose\Component\Core\Converter\StandardConverter;
 use Jose\Component\Core\JWKSet;
@@ -252,7 +253,11 @@ class CognitoClient
             $this->userPoolId
         );
 
-        return file_get_contents($url);
+        $client = new Client();
+
+        $response = $client->get($url);
+
+        return $response->getBody();
     }
 
     /**
@@ -264,13 +269,7 @@ class CognitoClient
      */
     public function registerUser($username, $password, array $attributes = [])
     {
-        $userAttributes = [];
-        foreach ($attributes as $key => $value) {
-            $userAttributes[] = [
-                'Name' => (string)$key,
-                'Value' => (string)$value,
-            ];
-        }
+        $userAttributes = $this->formatAsUserAttributes($attributes);
 
         try {
             $response = $this->client->signUp([
@@ -283,6 +282,82 @@ class CognitoClient
 
             return $response['UserSub'];
         } catch (CognitoIdentityProviderException $e) {
+            throw CognitoResponseException::createFromCognitoException($e);
+        }
+    }
+
+    /**
+     * @param string $username
+     * @param string $password
+     * @param array  $attributes
+     * @param string $messageAction
+     * @return string
+     * @throws Exception
+     */
+    public function adminRegisterUser($username, $password, array $attributes = [], $messageAction = 'SUPPRESS')
+    {
+        $userAttributes = $this->formatAsUserAttributes($attributes);
+
+        $validMessageActions = ['SUPPRESS', 'RESEND'];
+
+        if(! in_array($messageAction, $validMessageActions)) {
+            throw new \InvalidArgumentException('Confirmation action must be one of SUPRESS or RESEND.');
+        }
+
+        try {
+            $response = $this->client->adminCreateUser([
+                                                  'UserPoolId' => $this->userPoolId,
+                                                  'TemporaryPassword' => $password,
+                                                  'SecretHash' => $this->cognitoSecretHash($username),
+                                                  'UserAttributes' => $userAttributes,
+                                                  'Username' => $username,
+                                                  'MessageAction' => $messageAction
+                                              ]);
+
+            return $response['UserSub'];
+        } catch (CognitoIdentityProviderException $e) {
+            throw CognitoResponseException::createFromCognitoException($e);
+        }
+    }
+
+    /**
+     * @param $username
+     * @return mixed
+     * @throws Exception
+     */
+    public function adminConfirmSignup($username)
+    {
+        try {
+            $response = $this->client->adminConfirmSignUp([
+                                                           'UserPoolId' => $this->userPoolId,
+                                                           'SecretHash' => $this->cognitoSecretHash($username),
+                                                           'Username' => $username,
+                                                       ]);
+
+            return $response['UserSub'];
+        } catch (CognitoIdentityProviderException $e) {
+            throw CognitoResponseException::createFromCognitoException($e);
+        }
+    }
+
+    /**
+     * @param $accessToken
+     * @param $smsPreference
+     * @param $totpPreference
+     * @return mixed
+     * @throws Exception
+     */
+    public function setUserMfaPreference($accessToken, $smsPreference, $totpPreference)
+    {
+        try
+        {
+            $response = $this->client->setUserMFAPreference(['AccessToken' => $accessToken,
+                                                             'SMSMfaSetting' => $smsPreference,
+                                                             'SoftwareTokenMfaSettings' => $totpPreference
+                                                            ]);
+            return $response;
+        }
+        catch (CognitoIdentityProviderException $e) {
             throw CognitoResponseException::createFromCognitoException($e);
         }
     }
@@ -439,6 +514,35 @@ class CognitoClient
     }
 
     /**
+     * @param $accessToken
+     * @return array
+     */
+    public function getUser($accessToken)
+    {
+        return $this->client->getUser([
+                                          'AccessToken' => $accessToken
+                                      ])->toArray();
+    }
+
+    /**
+     * @param $username
+     * @return array
+     */
+    public function adminGetUserByUsername($username)
+    {
+        $user = $this->client->adminGetUser([
+                                   'Username' => $username,
+                                   'UserPoolId' => $this->userPoolId
+                               ]);
+        if($user)
+        {
+            $user['UserAttributes'] = $this->userAttributesToSimpleAttributes($user['UserAttributes']);
+        }
+
+        return $user->toArray();
+    }
+
+    /**
      * @param string $username
      *
      * @return string
@@ -482,5 +586,36 @@ class CognitoClient
         }
 
         throw new Exception('Could not handle AdminInitiateAuth response');
+    }
+
+    /**
+     * @param array $attributes
+     * @return array
+     */
+    private function formatAsUserAttributes(array $attributes): array
+    {
+        $userAttributes = [];
+        foreach ($attributes as $key => $value)
+        {
+            $userAttributes[] = [
+                'Name'  => (string)$key,
+                'Value' => (string)$value,
+            ];
+        }
+        return $userAttributes;
+    }
+
+    /**
+     * @param $userAttributes
+     * @return array
+     */
+    private function userAttributesToSimpleAttributes($userAttributes)
+    {
+        $attributes = [];
+        foreach($userAttributes as $userAttribute)
+        {
+            $attributes[$userAttribute['Name']] = $userAttribute['Value'];
+        }
+        return $attributes;
     }
 }
